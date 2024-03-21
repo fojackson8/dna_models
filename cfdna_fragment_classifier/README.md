@@ -1,4 +1,4 @@
-### Classifying cell-free DNA with multimodal pre-trained model
+# Classifying cell-free DNA with multimodal pre-trained model
 
 
 Large pre-trained model on individual reads from tissue data. Multimodal incorporating sequence + methylation state at base resolution. Apply trained model to cfDNA fragment classification. Steps as follows:
