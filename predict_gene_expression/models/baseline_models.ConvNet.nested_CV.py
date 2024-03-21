@@ -72,7 +72,7 @@ use_wandb=False
 # data_load_name = "1kb_bins.leave_one_out.test11.remove_zeros."
 # model_name = "1kb_bins.new_data.leave_one_out.exp20." # - strand genes are not switched in initial data processing, this data was then overwritten
 # model_name = "1kb_bins.new_data.leave_one_out.exp22." # after switching order for - strand genes
-model_name = "1kb.hybrid_model.nested_cv.exp2." # after switching order for - strand genes
+model_name = "1kb.convnet.nested_cv.exp1." # after switching order for - strand genes
 data_load_name = "20kb_upstream_downstream_gene_equal_bins."
 # save_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/dl_model/"
 save_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/finalise_model/data/"
@@ -133,68 +133,84 @@ n_epigenetic_cols = 3
 n_1kb_bins = 60
 
 batch_size = 32
+### Store model predictions
 predictions_dict = {}
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import mean_absolute_error, r2_score
-
-
-# class TransformerModel(nn.Module):
-#     def __init__(self, input_dim, d_model, nhead, num_layers, dim_feedforward, num_classes):
-#         super(TransformerModel, self).__init__()
-#         self.embedding = nn.Linear(input_dim, d_model)
-#         self.transformer_encoder = nn.TransformerEncoder(
-#             nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward),
-#             num_layers
-#         )
-#         self.fc = nn.Linear(d_model, num_classes)
-
-#     def forward(self, x):
-#         x = x.permute(2, 0, 1)  # Reshape to (sequence_length, batch_size, input_dim)
-#         x = self.embedding(x)
-#         x = self.transformer_encoder(x)
-#         x = x.mean(dim=0) 
-#         x = self.fc(x)
-#         return x
 
 
 
-
-class HybridModel(nn.Module):
-    def __init__(self, input_channels, d_model, nhead, num_layers, dim_feedforward, num_classes):
-        super(HybridModel, self).__init__()
-        self.conv1 = nn.Conv1d(input_channels, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
-        self.embedding = nn.Linear(64, d_model)
-        self.transformer_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward),
-            num_layers
+### Model training
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1,kernel_size=(3, 3)):
+        super(ResidualBlock, self).__init__()
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
         )
-        self.fc = nn.Linear(d_model, num_classes)
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1),
+            nn.BatchNorm2d(out_channels)
+        )
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0),
+                nn.BatchNorm2d(out_channels)
+            )
+        
+    def forward(self, x):
+        out = self.layer1(x)
+        # print("Output shape after layer1:", out.shape)  # Debug print
+        # print("Shortcut shape:", self.shortcut(x).shape)  # Debug print
+        
+        # out += self.shortcut(x)  # This is the residual connection
+        out = out + self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+def weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight.data)
+        if m.bias is not None:
+            m.bias.data.zero_()
+
+
+
+
+
+
+
+
+
+### Make bigger network
+class ConvNet(nn.Module):
+    def __init__(self):
+        super(ConvNet, self).__init__()
+
+        # Add more Residual Blocks to increase model complexity
+        self.layer1 = ResidualBlock(1, 32, kernel_size=(3, 5))  # Increased channels to 32
+        self.layer2 = ResidualBlock(32, 64, kernel_size=(3, 5))  # Increased channels to 64
+        self.layer3 = ResidualBlock(64, 128, kernel_size=(3, 5))  # Increased channels to 128
+        self.layer4 = ResidualBlock(128, 256, kernel_size=(3, 5))  # Added one more layer
+
+        # Increase the size of each fully connected layer
+        self.fc1 = nn.Linear(256 * n_epigenetic_cols * n_1kb_bins, 512)  # Changed from 128 to 512
+        self.fc2 = nn.Linear(512, 256)  # Changed from 64 to 256
+        self.fc3 = nn.Linear(256, 1)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)  # Reshape to (batch_size, input_channels, sequence_length)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.permute(2, 0, 1)  # Reshape to (sequence_length, batch_size, num_channels)
-        x = self.embedding(x)
-        x = self.transformer_encoder(x)
-        x = x.mean(dim=0)  
-        x = self.fc(x)
-        return x
+        out = self.layer1(x)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)  # Forward through the new layer
+        
+        out = out.view(out.size(0), -1)  # Flatten
+        out = F.relu(self.fc1(out))
+        out = F.relu(self.fc2(out))
+        out = self.fc3(out)
+        return out
 
-input_dim = 3
-d_model = 128
-nhead = 4
-num_layers = 2
-dim_feedforward = 256
-num_classes = 1
-
-# transformer_model = TransformerModel(input_dim, d_model, nhead, num_layers, dim_feedforward, num_classes).to(device)
-hybrid_model = HybridModel(input_dim, d_model, nhead, num_layers, dim_feedforward, num_classes).to(device)
 
 
 
@@ -215,7 +231,6 @@ print(model)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-from torch.optim.lr_scheduler import StepLR
 
 
 # Define Loss and Optimizer
@@ -320,8 +335,7 @@ for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    # model = ConvNet().to(device)
-    model = HybridModel(input_dim, d_model, nhead, num_layers, dim_feedforward, num_classes).to(device)
+    model = ConvNet().to(device)
     model.apply(weights_init)
 
     if use_wandb:
@@ -339,11 +353,12 @@ for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
 
     for epoch in range(epochs):
         train_loss = train(model, train_loader, criterion, optimizer, device)
-        val_loss = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        val_preds, val_labels = evaluate(model, val_loader, device)
+        val_mae = mean_absolute_error(val_labels, val_preds)  # Correct calculation of validation MAE
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val MAE: {val_mae:.4f}")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_mae < best_val_loss:  # Use val_mae for comparison
+            best_val_loss = val_mae  # Update best_val_loss using val_mae
             counter = 0
             best_model = model.state_dict()
         else:

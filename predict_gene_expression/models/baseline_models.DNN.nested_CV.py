@@ -19,12 +19,12 @@ import time
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.linear_model import ElasticNet
 
 import torch
-from torch import nn
-import torch.optim as optim
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import StepLR
@@ -72,7 +72,7 @@ use_wandb=False
 # data_load_name = "1kb_bins.leave_one_out.test11.remove_zeros."
 # model_name = "1kb_bins.new_data.leave_one_out.exp20." # - strand genes are not switched in initial data processing, this data was then overwritten
 # model_name = "1kb_bins.new_data.leave_one_out.exp22." # after switching order for - strand genes
-model_name = "1kb.convnet.nested_cv.exp1." # after switching order for - strand genes
+model_name = "1kb.DNN.nested_cv.exp1." # after switching order for - strand genes
 data_load_name = "20kb_upstream_downstream_gene_equal_bins."
 # save_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/dl_model/"
 save_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/finalise_model/data/"
@@ -106,12 +106,12 @@ if remove_brain:
 
 
 ## Save a section of the data to examine
-examine_data_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/examine_data/"
+# examine_data_dir = "/well/ludwig/users/dyp502/tissue_atlas_v3/predict_ge/1kb_model/examine_data/"
 
-n = 100000
-data_tensor_filtered_subset = data_tensor_filtered[:n]
-rna_seq_values_subset = rna_seq_values[:n]
-rna_seq_values_df_subset = rna_seq_values_df.iloc[:n]
+# n = 100000
+# data_tensor_filtered_subset = data_tensor_filtered[:n]
+# rna_seq_values_subset = rna_seq_values[:n]
+# rna_seq_values_df_subset = rna_seq_values_df.iloc[:n]
 
 # np.save(examine_data_dir + data_load_name + "data_tensor_filtered.npy", data_tensor_filtered_subset)
 # np.save(examine_data_dir + data_load_name + "rna_seq_values_subset.npy", rna_seq_values_subset)
@@ -131,111 +131,56 @@ rna_seq_values_df_subset = rna_seq_values_df.iloc[:n]
 
 n_epigenetic_cols = 3
 n_1kb_bins = 60
-
+test_run = False
 batch_size = 32
 ### Store model predictions
 predictions_dict = {}
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import mean_absolute_error, r2_score
 
 
-### Model training
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1,kernel_size=(3, 3)):
-        super(ResidualBlock, self).__init__()
-        self.layer1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.layer2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1),
-            nn.BatchNorm2d(out_channels)
-        )
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0),
-                nn.BatchNorm2d(out_channels)
-            )
+
+
+class SimpleDNN(nn.Module):
+    def __init__(self, input_size, output_size=1):
+        super(SimpleDNN, self).__init__()
         
-    def forward(self, x):
-        out = self.layer1(x)
-        # print("Output shape after layer1:", out.shape)  # Debug print
-        # print("Shortcut shape:", self.shortcut(x).shape)  # Debug print
-        
-        # out += self.shortcut(x)  # This is the residual connection
-        out = out + self.shortcut(x)
-        out = F.relu(out)
-        return out
-
-def weights_init(m):
-    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-        nn.init.kaiming_normal_(m.weight.data)
-        if m.bias is not None:
-            m.bias.data.zero_()
-
-
-
-
-
-
-
-
-
-### Make bigger network
-class ConvNet(nn.Module):
-    def __init__(self):
-        super(ConvNet, self).__init__()
-
-        # Add more Residual Blocks to increase model complexity
-        self.layer1 = ResidualBlock(1, 32, kernel_size=(3, 5))  # Increased channels to 32
-        self.layer2 = ResidualBlock(32, 64, kernel_size=(3, 5))  # Increased channels to 64
-        self.layer3 = ResidualBlock(64, 128, kernel_size=(3, 5))  # Increased channels to 128
-        self.layer4 = ResidualBlock(128, 256, kernel_size=(3, 5))  # Added one more layer
-
-        # Increase the size of each fully connected layer
-        self.fc1 = nn.Linear(256 * n_epigenetic_cols * n_1kb_bins, 512)  # Changed from 128 to 512
-        self.fc2 = nn.Linear(512, 256)  # Changed from 64 to 256
-        self.fc3 = nn.Linear(256, 1)
+        # Define fully connected layers
+        self.fc1 = nn.Linear(input_size, 512)  # First layer with input_size neurons
+        self.fc2 = nn.Linear(512, 256)  # Second layer
+        self.fc3 = nn.Linear(256, 128)  # Third layer
+        self.fc4 = nn.Linear(128, output_size)  # Output layer with 1 neuron for regression
 
     def forward(self, x):
-        out = self.layer1(x)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)  # Forward through the new layer
+        # Flatten the input
+        x = x.view(x.size(0), -1)
         
-        out = out.view(out.size(0), -1)  # Flatten
-        out = F.relu(self.fc1(out))
-        out = F.relu(self.fc2(out))
-        out = self.fc3(out)
-        return out
+        # Forward pass through the network
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)  # No activation function for the output layer in regression tasks
+        return x
 
 
-
-
-
-
-config = {"epochs":50,
-"learning_rate":0.001}
-
-if use_wandb:
-    wandb.login() 
-    run = wandb.init(project=f'predict_ge.DL_1kb.test9', config=config,entity="fojackson")
-
-# wandb.init(config=args)
-
-
-model = ConvNet()
-print(model)
-
+# Adjustments for model initialization
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-from torch.optim.lr_scheduler import StepLR
+n_features = n_epigenetic_cols * n_1kb_bins  # Calculate the total number of input features
+model = SimpleDNN(input_size=n_features).to(device)
+print(model)
+
+
+
+
+
+
+
+# config = {"epochs":50,
+# "learning_rate":0.001}
+
+
+
+
 
 
 # Define Loss and Optimizer
@@ -302,6 +247,13 @@ def evaluate(model, loader, device):
 
 
 
+def weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight.data)
+        if m.bias is not None:
+            m.bias.data.zero_()
+
+
 
 
 
@@ -310,12 +262,13 @@ results = []
 all_tissue_predictions_df = pd.DataFrame()
 counter = 0
 for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
+# for tissue in list(rna_seq_values_df['rna_seq_tissue'].unique())[4:5]:
 # for tissue in ['lung']:
-    start_time = time.time()
+    start_time = time.time() 
     print(f"Holding out {tissue}")
-    leave_out_tissue = tissue
-    train_df = rna_seq_values_df.loc[rna_seq_values_df['rna_seq_tissue'] != tissue]
-    leave_out_df = rna_seq_values_df.loc[rna_seq_values_df['rna_seq_tissue'] == tissue]
+    leave_out_tissue=tissue
+    train_df = rna_seq_values_df.loc[rna_seq_values_df['rna_seq_tissue']!=tissue]
+    leave_out_df = rna_seq_values_df.loc[rna_seq_values_df['rna_seq_tissue']==tissue]
     train_indices = list(train_df.index)
     leave_out_indices = list(leave_out_df.index)
     print(f"Training on {train_df.shape}")
@@ -326,89 +279,87 @@ for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
     train_target = rna_seq_values[train_indices]
     test_target = rna_seq_values[leave_out_indices]
 
-    # Split the training data into training and validation sets
-    train_data, val_data, train_labels, val_labels = train_test_split(
-        train_array, train_target, test_size=0.2, random_state=42
-    )
+
+    if test_run:
+        topn = 10000
+        train_array = train_array[0:topn,:,:]
+#         test_array = test_array[0:topn,:,:]
+        
+        train_target = train_target[0:topn]
+#         test_target = test_target[0:topn]
+
+    ## Reshape train_array and test_array into 2D for regression / feedforward
+    train_array = train_array.reshape((train_array.shape[0],  n_epigenetic_cols*n_1kb_bins))
+    test_array = test_array.reshape((test_array.shape[0], n_epigenetic_cols*n_1kb_bins))
+
+    # Print the shapes of the training and testing arrays
+    print(f"Shape of train_array: {train_array.shape}")
+    print(f"Shape of test_array: {test_array.shape}")
+
+    # If you're also interested in the target shapes
+    print(f"Shape of train_target: {train_target.shape}")
+    print(f"Shape of test_target: {test_target.shape}")
+
+
+    # np.save(examine_data_dir + data_load_name + "train_array.npy", train_array[:n,:])
+    # np.save(examine_data_dir + data_load_name + "test_array.npy", rna_seq_values_subset)
+
+    # np.save(examine_data_dir + data_load_name + "train_target.npy", data_tensor_filtered_subset)
+    # np.save(examine_data_dir + data_load_name + "test_target.npy", rna_seq_values_subset)
 
     # Convert arrays to PyTorch tensors and create DataLoaders
-    train_dataset = TensorDataset(torch.tensor(train_data, dtype=torch.float32).unsqueeze(1), torch.tensor(train_labels, dtype=torch.float32))
-    val_dataset = TensorDataset(torch.tensor(val_data, dtype=torch.float32).unsqueeze(1), torch.tensor(val_labels, dtype=torch.float32))
+    train_dataset = TensorDataset(torch.tensor(train_array, dtype=torch.float32).unsqueeze(1), torch.tensor(train_target, dtype=torch.float32))
     test_dataset = TensorDataset(torch.tensor(test_array, dtype=torch.float32).unsqueeze(1), torch.tensor(test_target, dtype=torch.float32))
-
+    
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,drop_last=True)
+    # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,drop_last=True)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    model = ConvNet().to(device)
+   # model = ConvNet()
+    model = SimpleDNN(input_size=n_features).to(device)
     model.apply(weights_init)
+
+    # wandb.init(config=args)
 
     if use_wandb:
         wandb.watch(model, log_freq=100)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    # Reinitialize the scheduler if you're creating a new optimizer instance
     scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
-    # Training Loop with Early Stopping
-    epochs = 20
-    patience = 5
-    best_val_loss = float('inf')
-    counter = 0
-    best_model = None
-
+    # Training Loop
+#     epochs = 100
+    if test_run:
+        epochs = 1
+    else:
+        epochs = 20
     for epoch in range(epochs):
         train_loss = train(model, train_loader, criterion, optimizer, device)
-        val_preds, val_labels = evaluate(model, val_loader, device)
-        val_mae = mean_absolute_error(val_labels, val_preds)  # Correct calculation of validation MAE
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val MAE: {val_mae:.4f}")
-
-        if val_mae < best_val_loss:  # Use val_mae for comparison
-            best_val_loss = val_mae  # Update best_val_loss using val_mae
-            counter = 0
-            best_model = model.state_dict()
-        else:
-            counter += 1
-            if counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
-
-        scheduler.step()
-
-    # Load the best model
-    model.load_state_dict(best_model)
-
-    # Retrain the model on the combined training and validation data
-    combined_data = np.concatenate((train_data, val_data), axis=0)
-    combined_labels = np.concatenate((train_labels, val_labels), axis=0)
-
-    combined_dataset = TensorDataset(torch.tensor(combined_data, dtype=torch.float32).unsqueeze(1), torch.tensor(combined_labels, dtype=torch.float32))
-    combined_loader = DataLoader(combined_dataset, batch_size=batch_size, shuffle=True)
-
-    # Reset the model weights and train on the combined data
-    model = ConvNet().to(device)
-    model.apply(weights_init)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
-
-    for epoch in range(epochs):
-        train_loss = train(model, combined_loader, criterion, optimizer, device)
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}")
-        scheduler.step()
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {train_loss:.4f}")
+        scheduler.step()  # Step the learning rate scheduler
 
     # Evaluation
-    train_preds, train_labels = evaluate(model, combined_loader, device)
+    train_preds, train_labels = evaluate(model, train_loader, device)
     test_preds, test_labels = evaluate(model, test_loader, device)
+
+    print(f"Shape of train_preds: {len(train_preds)}")
+    print(f"Shape of train_labels: {len(train_labels)}")
+    print(f"Shape of test_preds: {len(test_preds)}")
+    print(f"Shape of test_labels: {len(test_labels)}")
 
     leave_out_df['model_preds'] = test_preds
     all_tissue_predictions_df = pd.concat([all_tissue_predictions_df, leave_out_df])
 
     ### Store model predictions
     predictions_dict[tissue] = {
-        'train_preds': train_preds,
-        'train_labels': train_labels,
-        'test_preds': test_preds,
-        'test_labels': test_labels
-    }
+                                'train_preds': train_preds,
+                                'train_labels': train_labels,
+                                'test_preds': test_preds,
+                                'test_labels': test_labels
+                                 }
+
 
     train_mae = mean_absolute_error(train_labels, train_preds)
     test_mae = mean_absolute_error(test_labels, test_preds)
@@ -419,24 +370,14 @@ for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
     print(f"[{tissue}] Train MAE: {train_mae:.4f}, Test MAE: {test_mae:.4f}")
     print(f"[{tissue}] Train R2: {train_r2:.4f}, Test R2: {test_r2:.4f}")
 
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Time taken for {tissue}: {elapsed_time:.2f} seconds")
+
+    end_time = time.time()  # End time measurement here
+    elapsed_time = end_time - start_time  # Calculate the elapsed time
+    print(f"Time taken for {tissue}: {elapsed_time:.2f} seconds")  # Print the time taken
 
     results.append({
-        'train_samples': combined_data.shape[0],
-        'test_samples': test_array.shape[0],
-        'Tissue': tissue,
-        'Train MAE': train_mae,
-        'Test MAE': test_mae,
-        'Train R2': train_r2,
-        'Test R2': test_r2
-    })
-
-    if use_wandb:
-        wandb.log({
-            'train_data': train_array[10,:,:],
-            'test_data': test_array[10,:,:],
+            'train_samples': train_array.shape[0],
+            'test_samples': test_array.shape[0],
             'Tissue': tissue,
             'Train MAE': train_mae,
             'Test MAE': test_mae,
@@ -444,12 +385,20 @@ for tissue in rna_seq_values_df['rna_seq_tissue'].unique():
             'Test R2': test_r2
         })
 
-        # "Examples": example_images,
-        # "Test Accuracy": 100. * correct / len(test_loader.dataset),
-        # "Test Loss": test_loss})
+
+    if use_wandb:
+        wandb.log({'train_data': train_array[10,:,:],
+                'test_data': test_array[10,:,:],
+                'Tissue': tissue,
+                'Train MAE': train_mae,
+                'Test MAE': test_mae,
+                'Train R2': train_r2,
+                'Test R2': test_r2
+                })
 
 
-    
+
+
     model_save_path = model_save_dir + f"{model_name}{tissue}.trained_model.pth"
     torch.save(model.state_dict(), model_save_path)
     print(f"Model saved at {model_save_path}")
@@ -467,6 +416,8 @@ with open(model_save_dir + model_name + "predictions_dict.pkl", "wb") as f:
 
 
 all_tissue_predictions_df.to_csv(model_save_dir + model_name + "model_predictions_df.csv")
+
+
 
 
 
